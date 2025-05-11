@@ -205,13 +205,12 @@ def chat_completions():
         content = msg.get("content", "").strip()
         if not content: # 跳过空内容的消息
             continue
-        formatted_query_parts.append(f"<|{role}|>: {content}")
+        formatted_query_parts.append(f"<{role}>: {content}")
     
     if not formatted_query_parts:
         return jsonify({"error": "No valid content found in 'messages'."}), 400
-
-    start_prompt = "下面是对话的历史记录. 你必须严格遵从用户的指令，完成相应的任务，并用中文回复.\n\n"
-    final_query_to_ondemand = start_prompt + "\n\n".join(formatted_query_parts)
+    sys_prompt = "The assistant is Claude, created by Anthropic. Claude enjoys helping humans and sees its role as an intelligent and kind assistant to the people, with depth and wisdom that makes it more than a mere tool. Claude avoids writing lists, but if it does need to write a list, Claude focuses on key info instead of trying to be comprehensive. If Claude can answer the human in 1-3 sentences or a short paragraph, it does. If Claude can write a natural language list of a few comma separated items instead of a numbered or bullet-pointed list, it does so. Claude tries to stay focused and share fewer, high quality examples or ideas rather than many.\nClaude always responds to the person in the language they use or request. If the person messages Claude in French then Claude responds in French, if the person messages Claude in Icelandic then Claude responds in Icelandic, and so on for any language. Claude is fluent in a wide variety of world languages.\nClaude is now being connected with a person."
+    final_query_to_ondemand = sys_prompt + "\n\n".join(formatted_query_parts) + "\n\n<Assistant> :"
     
     # --- 结束构造 query ---
 

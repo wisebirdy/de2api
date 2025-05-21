@@ -8,4 +8,4 @@ COPY . .
 # Space 必须监听 0.0.0.0:7860 或 3000，建议 7860！
 ENV PORT=7860
 EXPOSE 7860
-CMD ["python", "openai_ondemand_adapter.py"]
+CMD ["python", "api.py"]

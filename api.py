@@ -8,25 +8,14 @@ import logging
 import os
 
 # 系统提示词
-CLAUDE_SYSTEM_PROMPT = """你是一个由Anthropic创建的AI助手Claude,你将使用中文与用户进行对话。请记住:
-
-1. 直接用中文回答问题,避免不必要的开场白
-2. 保持友好专业的态度,提供有深度的见解
-3. 如果问题模糊,可以适当提出澄清性的问题
-4. 答案应该简洁明了,避免冗长
-5. 优先提供一个明确的建议,而不是列举多个选项
-6. 对于专业领域的问题,提供准确和最新的信息
-7. 如果不确定某个信息,要明确指出
-8. 使用markdown格式来突出重要内容和代码
-9. 保持谨慎和理性,避免有害或误导性的回答
-10. 积极参与对话但不要过度热情
-
-重要说明：你只需要回复一次用户的问题，不要继续对话或，提供完整的回答后结束。"""
+CLAUDE_SYSTEM_PROMPT = open('./sys_claude.txt', 'r', encoding='utf-8').read().strip()
 
 # 配置和常量
 PRIVATE_KEY = os.environ.get("PRIVATE_KEY", "")
 SAFE_HEADERS = ["Authorization", "X-API-KEY"]
-ONDEMAND_API_BASE = "https://api.on-demand.io/chat/v1"
+# 根据环境变量type决定API基础URL
+API_TYPE = os.environ.get("API_TYPE", "").lower()
+ONDEMAND_API_BASE = "https://agentforge-api.aitech.io/chat/v1" if API_TYPE == "aitech" else "https://api.on-demand.io/chat/v1"
 BAD_KEY_RETRY_INTERVAL = 600
 DEFAULT_ONDEMAND_MODEL = "predefined-openai-gpt4o"
 
@@ -273,28 +262,44 @@ def chat_completions():
             return jsonify({"error": "No valid content in messages"}), 400
 
         # 添加系统提示词
-        query = CLAUDE_SYSTEM_PROMPT + "\n\n下面是对话历史:\n" + "\n".join(formatted_messages)
+        system_prompt = f"<|system|>: {CLAUDE_SYSTEM_PROMPT}\n"
+        query = system_prompt + "\n".join(formatted_messages)
 
-        # 处理请求
-        try:
-            apikey = keymgr.get()
-            if not apikey:
-                return jsonify({"error": "No available API keys"}), 503
+        # 处理请求，添加重试逻辑
+        max_retries = 5
+        retry_count = 0
+        last_error = None
+        
+        while retry_count < max_retries:
+            try:
+                apikey = keymgr.get()
+                if not apikey:
+                    return jsonify({"error": "No available API keys"}), 503
 
-            session_id = create_session(apikey)
-            
-            if is_stream:
-                return Response(
-                    handle_stream_request(apikey, session_id, query, endpoint_id, model),
-                    content_type='text/event-stream'
-                )
-            else:
-                return handle_non_stream_request(apikey, session_id, query, endpoint_id, model)
+                session_id = create_session(apikey)
                 
-        except Exception as e:
-            if isinstance(e, requests.exceptions.RequestException):
-                keymgr.mark_bad(apikey)
-            return jsonify({"error": str(e)}), 500
+                if is_stream:
+                    return Response(
+                        handle_stream_request(apikey, session_id, query, endpoint_id, model),
+                        content_type='text/event-stream'
+                    )
+                else:
+                    return handle_non_stream_request(apikey, session_id, query, endpoint_id, model)
+                    
+            except Exception as e:
+                last_error = str(e)
+                if isinstance(e, requests.exceptions.RequestException):
+                    keymgr.mark_bad(apikey)
+                
+                logging.warning(f"请求失败 (尝试 {retry_count+1}/{max_retries}): {last_error}")
+                retry_count += 1
+                
+                # 如果还有重试次数，继续尝试
+                if retry_count < max_retries:
+                    continue
+                
+                # 超过最大重试次数，返回400错误
+                return jsonify({"error": "超过重试次数，请重试", "details": last_error}), 400
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500

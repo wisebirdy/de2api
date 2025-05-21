@@ -2,6 +2,7 @@ FROM python:3.10-slim
 # 安装pip依赖
 WORKDIR /workspace
 COPY requirements.txt .
+COPY sys_claude.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 # 复制你的源码
 COPY . .

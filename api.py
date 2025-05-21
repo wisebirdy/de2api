@@ -411,7 +411,6 @@ def health_check():
             <h2>服务状态</h2>
             <p>状态: <span class="status-ok">正常运行中</span></p>
             <p>当前时间: {{ current_time }}</p>
-            <p><span class="status-ok">此页面无需API密钥即可访问</span></p>
         </div>
         
         <div class="models">

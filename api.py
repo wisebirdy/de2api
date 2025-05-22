@@ -47,12 +47,12 @@ def check_private_key():
             break
     
     if not PRIVATE_KEY:
-        logging.warning("PRIVATE_KEY 未设置,服务将不进行鉴权!")
+        logging.warning("安全警告：PRIVATE_KEY 未设置，服务将不进行鉴权！这可能导致未授权访问！")
         return None
 
     if not key_from_header or key_from_header != PRIVATE_KEY:
-        logging.warning(f"未授权访问: Path={request.path}, IP={request.remote_addr}")
-        return jsonify({"error": "Unauthorized. Correct 'Authorization: Bearer <PRIVATE_KEY>' or 'X-API-KEY: <PRIVATE_KEY>' header is required."}), 401
+        logging.warning(f"未授权访问: 路径={request.path}, IP地址={request.remote_addr}")
+        return jsonify({"error": "未授权访问。请提供正确的'Authorization: Bearer <PRIVATE_KEY>'或'X-API-KEY: <PRIVATE_KEY>'请求头。"}), 401
     return None
 
 # 密钥管理
@@ -69,7 +69,7 @@ class KeyManager:
     def get(self):
         with self.lock:
             if not self.key_list:
-                raise ValueError("API key pool is empty.")
+                raise ValueError("API密钥池为空，无法提供服务。请确保已配置有效的API密钥。")
 
             now = time.time()
             for _ in range(len(self.key_list)):
@@ -119,7 +119,7 @@ def create_session(apikey, external_user_id=None):
         resp.raise_for_status()
         return resp.json()["data"]["id"]
     except Exception as e:
-        logging.error(f"创建会话失败: {e}")
+        logging.error(f"创建会话失败：无法与API服务建立连接，错误详情：{e}")
         raise
 
 # 处理流式请求
@@ -141,6 +141,7 @@ def handle_stream_request(apikey, session_id, query, endpoint_id, model_name):
         with requests.post(url, json=payload, headers=headers, stream=True, timeout=180) as resp:
             resp.raise_for_status()
             first_chunk = True
+            has_content = False  # 标记是否接收到内容
             
             for line in resp.iter_lines():
                 if not line:
@@ -152,6 +153,9 @@ def handle_stream_request(apikey, session_id, query, endpoint_id, model_name):
                     
                 data = line[5:].strip()
                 if data == "[DONE]":
+                    # 如果没有接收到任何内容，抛出异常
+                    if not has_content:
+                        raise ValueError("空回复：未从API接收到任何有效内容，请稍后重试或联系管理员")
                     yield "data: [DONE]\n\n"
                     break
                     
@@ -161,6 +165,10 @@ def handle_stream_request(apikey, session_id, query, endpoint_id, model_name):
                         content = event_data.get("answer", "")
                         if content is None:
                             continue
+                        
+                        # 如果内容不为空，标记为已接收到内容
+                        if content.strip():
+                            has_content = True
                             
                         delta = {}
                         if first_chunk:
@@ -177,7 +185,7 @@ def handle_stream_request(apikey, session_id, query, endpoint_id, model_name):
                         }
                         yield format_openai_sse_delta(chunk)
                 except Exception as e:
-                    logging.warning(f"处理流数据出错: {e}")
+                    logging.warning(f"处理流式响应数据出错：解析或处理数据时发生异常，详情：{e}")
                     continue
     except Exception as e:
         error = {
@@ -189,8 +197,10 @@ def handle_stream_request(apikey, session_id, query, endpoint_id, model_name):
         }
         yield format_openai_sse_delta(error)
         yield "data: [DONE]\n\n"
+        # 重新抛出异常，以便上层函数可以捕获并重试
+        raise
 
-# 处理非流式请求        
+# 处理非流式请求
 def handle_non_stream_request(apikey, session_id, query, endpoint_id, model_name):
     url = f"{ONDEMAND_API_BASE}/sessions/{session_id}/query"
     payload = {
@@ -207,6 +217,10 @@ def handle_non_stream_request(apikey, session_id, query, endpoint_id, model_name
         response_data = resp.json()
         content = response_data["data"]["answer"]
         
+        # 检查回复是否为空
+        if not content or not content.strip():
+            raise ValueError("空回复：API返回了空内容，无法提供有效回答，请稍后重试")
+        
         return jsonify({
             "id": f"chatcmpl-{str(uuid.uuid4())[:12]}",
             "object": "chat.completion",
@@ -220,7 +234,9 @@ def handle_non_stream_request(apikey, session_id, query, endpoint_id, model_name
             "usage": {}
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        # 不在这里处理错误，而是将异常抛给上层函数处理
+        logging.warning(f"非流式请求失败：无法获取完整响应，错误详情：{e}")
+        raise
 
 # 路由处理
 @app.route("/v1/chat/completions", methods=["POST"])
@@ -228,11 +244,11 @@ def chat_completions():
     try:
         data = request.json
         if not data or "messages" not in data:
-            return jsonify({"error": "Invalid request format"}), 400
+            return jsonify({"error": "无效的请求格式：请求体必须包含messages字段"}), 400
 
         messages = data["messages"]
         if not isinstance(messages, list) or not messages:
-            return jsonify({"error": "Messages must be a non-empty list"}), 400
+            return jsonify({"error": "消息格式错误：messages必须是非空列表，且至少包含一条消息"}), 400
 
         model = data.get("model", "gpt-4o")
         endpoint_id = get_endpoint_id(model)
@@ -259,7 +275,7 @@ def chat_completions():
                 formatted_messages.append(f"<|{role}|>: {content}")
 
         if not formatted_messages:
-            return jsonify({"error": "No valid content in messages"}), 400
+            return jsonify({"error": "消息内容为空：所有消息均不包含有效内容，请检查消息格式"}), 400
 
         # 添加系统提示词
         system_prompt = f"<|system|>: {CLAUDE_SYSTEM_PROMPT}\n"
@@ -269,29 +285,47 @@ def chat_completions():
         max_retries = 5
         retry_count = 0
         last_error = None
+        empty_response_retries = 0  # 空回复重试计数
+        max_empty_retries = 5  # 最大空回复重试次数
         
         while retry_count < max_retries:
             try:
                 apikey = keymgr.get()
                 if not apikey:
-                    return jsonify({"error": "No available API keys"}), 503
+                    return jsonify({"error": "服务暂时不可用：没有可用的API密钥，请稍后重试或联系管理员"}), 503
 
                 session_id = create_session(apikey)
                 
                 if is_stream:
-                    return Response(
-                        handle_stream_request(apikey, session_id, query, endpoint_id, model),
-                        content_type='text/event-stream'
-                    )
+                    try:
+                        return Response(
+                            handle_stream_request(apikey, session_id, query, endpoint_id, model),
+                            content_type='text/event-stream'
+                        )
+                    except ValueError as ve:
+                        # 捕获空回复异常
+                        if "空回复" in str(ve) and empty_response_retries < max_empty_retries:
+                            empty_response_retries += 1
+                            logging.warning(f"检测到空回复：API未返回有效内容，正在使用新密钥重试 ({empty_response_retries}/{max_empty_retries})")
+                            continue  # 使用新密钥重试
+                        raise  # 其他ValueError或超过重试次数，重新抛出
                 else:
-                    return handle_non_stream_request(apikey, session_id, query, endpoint_id, model)
+                    try:
+                        return handle_non_stream_request(apikey, session_id, query, endpoint_id, model)
+                    except ValueError as ve:
+                        # 捕获空回复异常
+                        if "空回复" in str(ve) and empty_response_retries < max_empty_retries:
+                            empty_response_retries += 1
+                            logging.warning(f"检测到空回复：API未返回有效内容，正在使用新密钥重试 ({empty_response_retries}/{max_empty_retries})")
+                            continue  # 使用新密钥重试
+                        raise  # 其他ValueError或超过重试次数，重新抛出
                     
             except Exception as e:
                 last_error = str(e)
                 if isinstance(e, requests.exceptions.RequestException):
                     keymgr.mark_bad(apikey)
                 
-                logging.warning(f"请求失败 (尝试 {retry_count+1}/{max_retries}): {last_error}")
+                logging.warning(f"请求处理失败 (尝试 {retry_count+1}/{max_retries})：可能是网络问题或API服务不稳定，错误详情：{last_error}")
                 retry_count += 1
                 
                 # 如果还有重试次数，继续尝试
@@ -299,10 +333,10 @@ def chat_completions():
                     continue
                 
                 # 超过最大重试次数，返回400错误
-                return jsonify({"error": "超过重试次数，请重试", "details": last_error}), 400
+                return jsonify({"error": "请求失败：已超过最大重试次数，请稍后再试", "details": last_error}), 400
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"error": f"服务器内部错误：{str(e)}，请联系管理员"}), 500
 
 @app.route("/v1/models", methods=["GET"])
 def list_models():
@@ -458,7 +492,7 @@ if __name__ == "__main__":
     )
 
     if not ONDEMAND_APIKEYS:
-        logging.warning("未设置ONDEMAND_APIKEYS环境变量,服务可能无法正常工作")
+        logging.warning("配置错误：未设置ONDEMAND_APIKEYS环境变量，服务将无法连接到API提供商，请配置至少一个有效的API密钥")
     
     port = int(os.environ.get("PORT", 7860))
     app.run(host="0.0.0.0", port=port, debug=False)

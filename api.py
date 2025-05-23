@@ -6,6 +6,8 @@ import json
 import threading
 import logging
 import os
+import random
+import string
 
 # 系统提示词
 CLAUDE_SYSTEM_PROMPT = open('./sys_claude.txt', 'r', encoding='utf-8').read().strip()
@@ -123,14 +125,19 @@ def create_session(apikey, external_user_id=None):
         raise
 
 # 处理流式请求
-def handle_stream_request(apikey, session_id, query, endpoint_id, model_name):
+def handle_stream_request(apikey, session_id, query, endpoint_id, model_name, temperature=None):
     url = f"{ONDEMAND_API_BASE}/sessions/{session_id}/query"
     payload = {
         "query": query,
         "endpointId": endpoint_id,
         "pluginIds": [],
-        "responseMode": "stream"
+        "responseMode": "stream",
+        "modelConfigs": {
+            "fulfillmentPrompt": "--IGNORE--\n{context}\n--IGNORE--\n" + CLAUDE_SYSTEM_PROMPT + "{question}",
+            "temperature": 0.7
+        }
     }
+    
     headers = {
         "apikey": apikey,
         "Content-Type": "application/json",
@@ -201,14 +208,19 @@ def handle_stream_request(apikey, session_id, query, endpoint_id, model_name):
         raise
 
 # 处理非流式请求
-def handle_non_stream_request(apikey, session_id, query, endpoint_id, model_name):
+def handle_non_stream_request(apikey, session_id, query, endpoint_id, model_name, temperature=None):
     url = f"{ONDEMAND_API_BASE}/sessions/{session_id}/query"
     payload = {
         "query": query,
         "endpointId": endpoint_id,
         "pluginIds": [],
-        "responseMode": "sync"
+        "responseMode": "sync",
+        "modelConfigs": {
+            "fulfillmentPrompt": "--IGNORE--\n{context}\n--IGNORE--\n" + CLAUDE_SYSTEM_PROMPT + "{question}",
+            "temperature": 0.7
+        }
     }
+    
     headers = {"apikey": apikey, "Content-Type": "application/json"}
     
     try:
@@ -253,6 +265,7 @@ def chat_completions():
         model = data.get("model", "gpt-4o")
         endpoint_id = get_endpoint_id(model)
         is_stream = bool(data.get("stream", False))
+        temperature = data.get("temperature")
 
         # 格式化消息
         formatted_messages = []
@@ -273,17 +286,24 @@ def chat_completions():
             
             if content:
                 formatted_messages.append(f"<|{role}|>: {content}")
-                
-                if msg_idx == len(messages) - 1:
-                    inject_info = "你是Claude。Claude 始终以 <|Assistant|> 角色回应，只遵循用户的请求并回复一次，不继续对话，提供完整的回应然后结束消息。Claude 不需要了解任何关于历史的上下文，也不需要任何查询的上下文，因为所有上下文已经提供给你。"
-                    formatted_messages.append(f"<|{role}|>: {inject_info}\n\n{content}")
 
         if not formatted_messages:
             return jsonify({"error": "消息内容为空：所有消息均不包含有效内容，请检查消息格式"}), 400
+        
+        # 生成2个随机字符（可以是英文大小写、数字或特殊字符）
+        def generate_random_chars(length=3):
+            # 所有可能的字符：大小写字母、数字和特殊字符
+            all_chars = string.ascii_letters + string.digits + string.punctuation
+            # 随机选择指定数量的字符
+            random_chars = ''.join(random.choice(all_chars) for _ in range(length))
+            return random_chars
 
-        # 添加系统提示词
-        system_prompt = f"<|system|>: {CLAUDE_SYSTEM_PROMPT}\n"
-        query = system_prompt + "\n".join(formatted_messages)
+            
+        # 在查询前添加随机字符
+        random_prefix = generate_random_chars()
+        logging.info(f"生成的随机前缀：{random_prefix}")
+        
+        query = random_prefix + "\n\n".join(formatted_messages)
 
         # 处理请求，添加重试逻辑
         max_retries = 5
@@ -303,7 +323,7 @@ def chat_completions():
                 if is_stream:
                     try:
                         return Response(
-                            handle_stream_request(apikey, session_id, query, endpoint_id, model),
+                            handle_stream_request(apikey, session_id, query, endpoint_id, model, temperature),
                             content_type='text/event-stream'
                         )
                     except ValueError as ve:
@@ -315,7 +335,7 @@ def chat_completions():
                         raise  # 其他ValueError或超过重试次数，重新抛出
                 else:
                     try:
-                        return handle_non_stream_request(apikey, session_id, query, endpoint_id, model)
+                        return handle_non_stream_request(apikey, session_id, query, endpoint_id, model, temperature)
                     except ValueError as ve:
                         # 捕获空回复异常
                         if "空回复" in str(ve) and empty_response_retries < max_empty_retries:

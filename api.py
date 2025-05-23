@@ -256,7 +256,7 @@ def chat_completions():
 
         # 格式化消息
         formatted_messages = []
-        for msg in messages:
+        for msg_idx, msg in enumerate(messages):
             role = msg.get("role", "user").strip().capitalize()
             content = msg.get("content", "")
             
@@ -273,6 +273,10 @@ def chat_completions():
             
             if content:
                 formatted_messages.append(f"<|{role}|>: {content}")
+                
+                if msg_idx == len(messages) - 1:
+                    inject_info = "你是Claude。Claude 始终以 <|Assistant|> 角色回应，只遵循用户的请求并回复一次，不继续对话，提供完整的回应然后结束消息。Claude 不需要了解任何关于历史的上下文，也不需要任何查询的上下文，因为所有上下文已经提供给你。"
+                    formatted_messages.append(f"<|{role}|>: {inject_info}\n\n{content}")
 
         if not formatted_messages:
             return jsonify({"error": "消息内容为空：所有消息均不包含有效内容，请检查消息格式"}), 400
